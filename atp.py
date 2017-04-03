@@ -37,7 +37,8 @@ class adaptiveThreatPrevention (EventMixin):
 		self.raiseEvent(check_packetIn,event)
 
 	def _timely_flow_stats (self):
-		self.raiseEvent(flowStatsEvent)
+		#self.raiseEvent(flowStatsEvent)
+		pass
 
 def launch():
 	core.registerNew(adaptiveThreatPrevention)
