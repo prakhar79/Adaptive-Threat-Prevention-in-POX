@@ -8,7 +8,7 @@ import pox.openflow.libopenflow_01 as of
 from pox.lib.revent import *
 import pox
 from pox.lib.recoco import Timer
-
+from pox.lib.packet.ipv4 import ipv4
 log = core.getLogger()
 
 class check_packetIn(Event):
@@ -34,11 +34,13 @@ class adaptiveThreatPrevention (EventMixin):
 		Timer(5, self._timely_flow_stats, recurring=True)
 
 	def _handle_PacketIn (self,event):
-		self.raiseEvent(check_packetIn,event)
+		packet = event.parsed
+		
+		if isinstance(packet.next, ipv4):
+			self.raiseEvent(check_packetIn,event)
 
 	def _timely_flow_stats (self):
-		#self.raiseEvent(flowStatsEvent)
-		pass
+		self.raiseEvent(flowStatsEvent)
 
 def launch():
 	core.registerNew(adaptiveThreatPrevention)

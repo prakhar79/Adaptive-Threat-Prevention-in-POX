@@ -14,7 +14,6 @@ from pox.lib.util import str_to_bool, dpid_to_str
 from pox.lib.recoco import Timer
 
 from pox.openflow.of_json import *
-
 log = core.getLogger()
 
 '''
@@ -37,9 +36,8 @@ This will get flow stats and get packets counts from the entries.
 class atp_events(EventMixin):
 
 	def __init__(self):
+
 		self.listenTo(core)
-		self.newList = {}
-		self.regList = {}
 		self.ip_count = 0
 		self.ip_req = 1
 		self.avg_count = 100
@@ -49,92 +47,127 @@ class atp_events(EventMixin):
 		self.idleTimeout = 5
 		self.RegHardTimeout = 15
 		self.regReq = 3
+
+	newList = {}
+	regList = {}
+
+	def dropIP (self,event):
+		packet = event.event.parsed
+		msg = of.ofp_flow_mod()
+		msg.command = of.OFPFC_DELETE
+		msg.match.nw_dst = packet.next.srcip
+		event.event.connection.send(msg)
+
+		log.info("Issusing Drop Entry.")
+		msg = of.ofp_flow_mod()
+		msg.command = of.OFPFC_ADD
+		msg.idle_timeout = 30
+		msg.hard_timeout = 60
+		msg.match.nw_dst = packet.next.srcip
+		event.event.connection.send(msg)
+
+	def issueNormalEntry(self,event):
+		inport = event.event.port
+		packet = event.event.parsed
+		log.info("Issusing Normal Entry.")
+		msg = of.ofp_flow_mod()
+		msg.command = of.OFPFC_MODIFY
+		msg.idle_timeout = 10
+		msg.hard_timeout = 30
+		msg.match = match=of.ofp_match.from_packet(packet,
+			inport)
+		event.event.connection.send(msg)
+
+	def issueNewEntry(self,event):
+		inport = event.event.port
+		packet = event.event.parsed
+		log.info("Issusing New Entry.")
+		msg = of.ofp_flow_mod()
+		msg.command = of.OFPFC_MODIFY
+		msg.idle_timeout = 2
+		msg.hard_timeout = 10
+		msg.match = match=of.ofp_match.from_packet(packet,
+			inport)
+		event.event.connection.send(msg)
+
+	def _handle_GoingUpEvent(self,event):
 		self.listenTo(core.openflow)
 		self.listenTo(core.adaptiveThreatPrevention)
 
 	def _handle_check_packetIn(self,event):
+		
 		packet = event.event.parsed
-		print (self.newList)
-		if isinstance(packet.next, ipv4):
-	
-			s_ip = packet.next.srcip
-			print(str(packet.next.srcip) + " " +  str(packet.next.dstip) + " " + str(packet.next.id))
-			if(s_ip in self.regList.keys()):
-				
-				'''
-				check packet count..
+		s_ip = packet.next.srcip
+		
+		if(s_ip in self.regList.keys()):
+			
+			'''
+			check packet count..
+			get status from switches.
+			if it is in sending normal packets Issue normal entry
+			if not then remove from reglist
+			delete entry for long time push rule to switch blocking such entry 
+			'''
+			self.regList[s_ip][self.ip_count] += 1
 
-				get status from switches.
-
-				if it is in sending normal packets Issue normal entry
-
-				if not then remove from reglist
-
-				delete entry for long time push rule to switch blocking such entry 
-				'''
-				self.regList[s_ip][self.ip_count] += 1
-
-				if(self.regList[s_ip][self.ip_count] < self.AvgMaxCount):
-					#issue regular entry
-					log.info("Packet from %s are %s" % (s_ip,self.regList[s_ip][self.ip_count]))
-				else:
-					#delete all entries.
-
-					#remvove all entries from switches.
-
-					#block for long time.
-
-					#remove from the database.
-					#log.info("Blocking %s. as it is making %s requests." % (s_ip,self.regList[s_ip][self.ip_count]))
-					del self.regList[s_ip]
+			if(self.regList[s_ip][self.ip_count] < self.AvgMaxCount):
+				#issue regular entry
+				#log.info("Packet from %s are %s" % (s_ip,self.regList[s_ip][self.ip_count]))
+				self.issueNormalEntry(event)
+			else:
+				#delete all entries.
+				#remvove all entries from switches.
+				#block for long time.
+				#remove from the database.
+				#log.info("Blocking %s. as it is making %s requests." % (s_ip,self.regList[s_ip][self.ip_count]))
+				del self.regList[s_ip]
+				self.dropIP(event)
 
 
-			elif (s_ip in self.newList.keys()):
+		elif (s_ip in self.newList.keys()):
 
-				'''
-				check new packets counts 
+			'''
+			check new packets counts 
+			gets stats from switches
+			if okay then check number of entry... 
+			if entry is more than 5 then move to regualar list.
+			'''
+			self.newList[s_ip][self.ip_count] += 1
 
-				gets stats from switches
 
-				if okay then check number of entry... 
+			#Update flow entry request count
+			self.newList[s_ip][self.ip_req] = self.newList[s_ip][self.ip_req] + 1
+			#log.info(self.newList[s_ip])
 
-				if entry is more than 5 then move to regualar list.
+			#check packet count from switches. 
 
-				'''
-				self.newList[s_ip][self.ip_count] += 1
+			if(self.newList[s_ip][self.ip_count] > self.AvgMinCount):
+				#issue new entry.
+				#log.info("Packet from %s are %s" % (s_ip,self.newList[s_ip][self.ip_count]))
+				self.issueNewEntry(event)
 
-				#Update flow entry request count
-				self.newList[s_ip][self.ip_req] = self.newList[s_ip][self.ip_req] + 1
-				#log.info(self.newList[s_ip])
-
-				#check packet count from switches. 
-
-				if(self.newList[s_ip][self.ip_count] > self.AvgMinCount):
-					#issue new entry.
-					log.info("Packet from %s are %s" % (s_ip,self.newList[s_ip][self.ip_count]))
-
-					#check if its regular list eligible for reg list or not.
-					if (self.newList[s_ip][self.ip_req] > self.regReq):
-						log.info("Moving to reg.")
-						self.regList[s_ip] = [0,1]
-						self.regList[s_ip][self.ip_count] = self.newList[s_ip][self.ip_count]
-						self.regList[s_ip][self.ip_req] = self.newList[s_ip][self.ip_req]
-						del self.newList[s_ip]
-				else:
-					#remove all entries in switches. 
-
-					#block for long time with high hardtimeout.
-
-					#remove from newList.
-					#log.info("Blocking %s. as it is making %s requests." % (s_ip,self.newList[s_ip][self.ip_count]))
+				#check if its regular list eligible for reg list or not.
+				if (self.newList[s_ip][self.ip_req] > self.regReq):
+					log.info("Moving to reg.")
+					self.regList[s_ip] = [0,1]
+					self.regList[s_ip][self.ip_count] = self.newList[s_ip][self.ip_count]
+					self.regList[s_ip][self.ip_req] = self.newList[s_ip][self.ip_req]
 					del self.newList[s_ip]
 
 			else:
-				'''
-				Add to newlist and issue a normal entry.
-				'''
+				#remove all entries in switches. 
+				#block for long time with high hardtimeout.
+				#remove from newList.
+				#log.info("Blocking %s. as it is making %s requests." % (s_ip,self.newList[s_ip][self.ip_count]))
+				del self.newList[s_ip]
+				self.dropIP(event)
 
-				self.newList[s_ip] = [0,1]
+		else:
+			'''
+			Add to newlist and issue a normal entry.
+			'''
+			self.newList[s_ip] = [0,1]
+			self.issueNewEntry(event)
 
 	def _handle_flowStatsEvent(self,event):
 		#log.info(self.newList)
@@ -152,12 +185,10 @@ class atp_events(EventMixin):
 		f_ip = msg.match.nw_src
 		if(f_ip in self.newList.keys()):
 			self.newList[f_ip][self.ip_count] = self.newList[f_ip][self.ip_count] + msg.packet_count
+			log.info(self.newList[f_ip][self.ip_count])
 		elif (f_ip in self.regList.keys()):
-			self.newList[f_ip][self.ip_count] = self.regList[f_ip][self.ip_count] + msg.packet_count
-
-
-
-		log.info(msg.packet_count)
+			self.regList[f_ip][self.ip_count] = self.regList[f_ip][self.ip_count] + msg.packet_count
+			log.info(self.regList[f_ip][self.ip_count])
 
 
 def launch():
