@@ -16,6 +16,8 @@ from pox.lib.recoco import Timer
 from pox.openflow.of_json import *
 log = core.getLogger()
 
+HOST_IP = IPAddr('10.0.0.5')
+
 '''
 This module has all the necessary event handling functions of ATP algorithm.
 This modules does following tasks.
@@ -38,57 +40,48 @@ class atp_events(EventMixin):
 	def __init__(self):
 
 		self.listenTo(core)
-		self.ip_count = 0
-		self.ip_req = 1
-		self.avg_count = 100
-		self.AvgMinCount = 2
-		self.AvgMaxCount = 20
+		self.reqPackets = 0
+		self.dataPackets = 1
+		self.avgCount = 2
+		self.minReqCount = 5
+		self.maxReqCount = 20
 		self.newHardTimeout = 5
 		self.idleTimeout = 5
 		self.RegHardTimeout = 15
 		self.regReq = 3
 
 	newList = {}
-	regList = {}
+	regList = {IPAddr('10.0.0.2') : [0,0], IPAddr('10.0.0.3') : [0,0]}
 
 	def dropIP (self,event):
-		packet = event.event.parsed
+		packet = event.parsed
 		msg = of.ofp_flow_mod()
 		msg.command = of.OFPFC_DELETE
-		msg.match.nw_dst = packet.next.srcip
-		event.event.connection.send(msg)
+		msg.nw_src = (packet.next.srcip,32)
 
 		log.info("Issusing Drop Entry.")
 		msg = of.ofp_flow_mod()
 		msg.command = of.OFPFC_ADD
+		msg.nw_src = (packet.next.srcip,32)
+		action = of.ofp_action_output(port = of.OFPP_NONE)
+		msg.actions.append(action)          
 		msg.idle_timeout = 30
-		msg.hard_timeout = 60
-		msg.match.nw_dst = packet.next.srcip
-		event.event.connection.send(msg)
+		msg.hard_timeout = 3600
+		msg.flags=of.OFPFF_SEND_FLOW_REM
+		
+		event.connection.send(msg)
 
 	def issueNormalEntry(self,event):
-		inport = event.event.port
-		packet = event.event.parsed
-		log.info("Issusing Normal Entry.")
+		inport = event.port
+		packet = event.parsed
+		#log.info("Issusing Normal Entry for %s." % packet.next.srcip)
 		msg = of.ofp_flow_mod()
 		msg.command = of.OFPFC_MODIFY
+		msg.match = of.ofp_match.from_packet(packet,
+			inport)
 		msg.idle_timeout = 10
 		msg.hard_timeout = 30
-		msg.match = match=of.ofp_match.from_packet(packet,
-			inport)
-		event.event.connection.send(msg)
-
-	def issueNewEntry(self,event):
-		inport = event.event.port
-		packet = event.event.parsed
-		log.info("Issusing New Entry.")
-		msg = of.ofp_flow_mod()
-		msg.command = of.OFPFC_MODIFY
-		msg.idle_timeout = 2
-		msg.hard_timeout = 10
-		msg.match = match=of.ofp_match.from_packet(packet,
-			inport)
-		event.event.connection.send(msg)
+		event.connection.send(msg)
 
 	def _handle_GoingUpEvent(self,event):
 		self.listenTo(core.openflow)
@@ -96,78 +89,76 @@ class atp_events(EventMixin):
 
 	def _handle_check_packetIn(self,event):
 		
+		#parsing the pakcet to get necessary data.
 		packet = event.event.parsed
-		s_ip = packet.next.srcip
+		srcIP = packet.next.srcip
+
+		if(srcIP == HOST_IP):
+			return
+
+		if(srcIP in self.regList.keys()):
+			'''
+			#src is registered as regular IP.
+			1. Issue a normal entry.
+			2. srcIP reqPacketcount ++.
+			'''
+
+			self.issueNormalEntry(event.event)
+			self.regList[srcIP][self.reqPackets] += 1
+
+			'''
+			#Check its reqPacket count.
+			1. If reqPacket count > maxReqCount
+				It's DoS attacker.
+			'''
+
+			if(self.regList[srcIP][self.reqPackets] > self.maxReqCount):
+				#It will be considered as a DoS attacker.
+
+				#check data packets.
+				if(self.regList[srcIP][self.dataPackets] < (3*self.regList[srcIP][self.reqPackets])):
+					#definately DoS attacker.
+
+					#delete all entries.
+
+					#issues drop for long time.
+					self.dropIP(event.event)
+
+					#remove from database.
+					del self.regList[srcIP]
 		
-		if(s_ip in self.regList.keys()):
-			
-			'''
-			check packet count..
-			get status from switches.
-			if it is in sending normal packets Issue normal entry
-			if not then remove from reglist
-			delete entry for long time push rule to switch blocking such entry 
-			'''
-			self.regList[s_ip][self.ip_count] += 1
+		elif (srcIP in self.newList.keys()):
 
-			if(self.regList[s_ip][self.ip_count] < self.AvgMaxCount):
-				#issue regular entry
-				#log.info("Packet from %s are %s" % (s_ip,self.regList[s_ip][self.ip_count]))
-				self.issueNormalEntry(event)
-			else:
-				#delete all entries.
-				#remvove all entries from switches.
-				#block for long time.
-				#remove from the database.
-				#log.info("Blocking %s. as it is making %s requests." % (s_ip,self.regList[s_ip][self.ip_count]))
-				del self.regList[s_ip]
-				self.dropIP(event)
+			#issue new short entry.
+			#issueNewEntry(event)
+			#print("New Entry for %s." % srcIP)
+			self.newList[srcIP][self.reqPackets] += 1
 
+			if(self.newList[srcIP][self.reqPackets] > self.minReqCount):
 
-		elif (s_ip in self.newList.keys()):
+				#get status from the switch.
+				if(self.newList[srcIP][self.dataPackets] < self.avgCount):
+					#Its a DDoS attacker.
 
-			'''
-			check new packets counts 
-			gets stats from switches
-			if okay then check number of entry... 
-			if entry is more than 5 then move to regualar list.
-			'''
-			self.newList[s_ip][self.ip_count] += 1
+					#remove all entries.
 
+					#issue drop for long time
 
-			#Update flow entry request count
-			self.newList[s_ip][self.ip_req] = self.newList[s_ip][self.ip_req] + 1
-			#log.info(self.newList[s_ip])
+					#remove from database.
+					del self.newList[srcIP]
 
-			#check packet count from switches. 
+				else:
+					#add to reg database.
+					self.regList[srcIP] = self.newList[srcIP]
+					del self.newList[srcIP]
 
-			if(self.newList[s_ip][self.ip_count] > self.AvgMinCount):
-				#issue new entry.
-				#log.info("Packet from %s are %s" % (s_ip,self.newList[s_ip][self.ip_count]))
-				self.issueNewEntry(event)
+		else :	
 
-				#check if its regular list eligible for reg list or not.
-				if (self.newList[s_ip][self.ip_req] > self.regReq):
-					log.info("Moving to reg.")
-					self.regList[s_ip] = [0,1]
-					self.regList[s_ip][self.ip_count] = self.newList[s_ip][self.ip_count]
-					self.regList[s_ip][self.ip_req] = self.newList[s_ip][self.ip_req]
-					del self.newList[s_ip]
+			#issue Normal entry.
 
-			else:
-				#remove all entries in switches. 
-				#block for long time with high hardtimeout.
-				#remove from newList.
-				#log.info("Blocking %s. as it is making %s requests." % (s_ip,self.newList[s_ip][self.ip_count]))
-				del self.newList[s_ip]
-				self.dropIP(event)
+			#add to new list.
+			self.newList[srcIP] = [1,0]
 
-		else:
-			'''
-			Add to newlist and issue a normal entry.
-			'''
-			self.newList[s_ip] = [0,1]
-			self.issueNewEntry(event)
 
 	def _handle_flowStatsEvent(self,event):
 		#log.info(self.newList)
@@ -183,12 +174,11 @@ class atp_events(EventMixin):
 	def _handle_FlowRemoved(self,event):
 		msg = event.ofp
 		f_ip = msg.match.nw_src
+		#print (msg.idle_timeout)
 		if(f_ip in self.newList.keys()):
-			self.newList[f_ip][self.ip_count] = self.newList[f_ip][self.ip_count] + msg.packet_count
-			log.info(self.newList[f_ip][self.ip_count])
+			self.newList[f_ip][self.dataPackets] = self.newList[f_ip][self.dataPackets] + msg.packet_count
 		elif (f_ip in self.regList.keys()):
-			self.regList[f_ip][self.ip_count] = self.regList[f_ip][self.ip_count] + msg.packet_count
-			log.info(self.regList[f_ip][self.ip_count])
+			self.regList[f_ip][self.dataPackets] = self.regList[f_ip][self.dataPackets] + msg.packet_count
 
 
 def launch():

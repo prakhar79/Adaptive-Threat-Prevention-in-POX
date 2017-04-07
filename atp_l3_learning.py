@@ -43,7 +43,8 @@ from pox.lib.revent import *
 import time
 
 # Timeout for flows
-FLOW_IDLE_TIMEOUT = 10
+FLOW_IDLE_TIMEOUT = 5
+FLOW_HARD_TIMEOUT = 60
 
 # Timeout for ARP entries
 ARP_TIMEOUT = 60 * 2
@@ -210,7 +211,7 @@ class l3_switch (EventMixin):
 
           msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
                                 idle_timeout=FLOW_IDLE_TIMEOUT,
-                                hard_timeout=of.OFP_FLOW_PERMANENT,
+                                hard_timeout=FLOW_HARD_TIMEOUT,
                                 buffer_id=event.ofp.buffer_id,
                                 actions=actions,
                                 flags=of.OFPFF_SEND_FLOW_REM,
