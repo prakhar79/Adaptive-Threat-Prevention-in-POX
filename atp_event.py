@@ -43,8 +43,8 @@ class atp_events(EventMixin):
 		self.reqPackets = 0
 		self.dataPackets = 1
 		self.avgCount = 2
-		self.minReqCount = 5
-		self.maxReqCount = 20
+		self.minReqCount = 2
+		self.maxReqCount = 5
 		self.newHardTimeout = 5
 		self.idleTimeout = 5
 		self.RegHardTimeout = 15
@@ -56,25 +56,33 @@ class atp_events(EventMixin):
 	def dropIP (self,event):
 		packet = event.parsed
 		msg = of.ofp_flow_mod()
+		ip = packet.next.srcip
 		msg.command = of.OFPFC_DELETE
-		msg.nw_src = (packet.next.srcip,32)
+		
+		msg.match.dl_type = packet.type
+		msg.match.nw_proto = packet.next.protocol
+		msg.match.nw_src = packet.next.srcip
+		event.connection.send(msg)
+		log.info("Delete %s with %s and %s." %(packet.type,packet.next.protocol,packet.next.srcip))
 
-		log.info("Issusing Drop Entry.")
 		msg = of.ofp_flow_mod()
-		msg.command = of.OFPFC_ADD
-		msg.nw_src = (packet.next.srcip,32)
-		action = of.ofp_action_output(port = of.OFPP_NONE)
-		msg.actions.append(action)          
+		msg.command = of.OFPFC_MODIFY
+		msg.match.dl_type = packet.type
+		msg.match.nw_proto = packet.next.protocol
+		msg.match.nw_src = packet.next.srcip
+
 		msg.idle_timeout = 30
 		msg.hard_timeout = 3600
+
 		msg.flags=of.OFPFF_SEND_FLOW_REM
 		
 		event.connection.send(msg)
+		log.info("Issusing Drop Entry.")
 
 	def issueNormalEntry(self,event):
 		inport = event.port
 		packet = event.parsed
-		#log.info("Issusing Normal Entry for %s." % packet.next.srcip)
+		log.info("Issusing Normal Entry.")
 		msg = of.ofp_flow_mod()
 		msg.command = of.OFPFC_MODIFY
 		msg.match = of.ofp_match.from_packet(packet,
@@ -106,6 +114,8 @@ class atp_events(EventMixin):
 			self.issueNormalEntry(event.event)
 			self.regList[srcIP][self.reqPackets] += 1
 
+			print (self.regList[srcIP][self.reqPackets])
+
 			'''
 			#Check its reqPacket count.
 			1. If reqPacket count > maxReqCount
@@ -121,11 +131,13 @@ class atp_events(EventMixin):
 
 					#delete all entries.
 
+					#remove from database.
+					del self.regList[srcIP]
+
 					#issues drop for long time.
 					self.dropIP(event.event)
 
-					#remove from database.
-					del self.regList[srcIP]
+					
 		
 		elif (srcIP in self.newList.keys()):
 
