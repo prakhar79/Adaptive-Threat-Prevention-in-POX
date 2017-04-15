@@ -9,6 +9,7 @@ from pox.lib.revent import *
 import pox
 from pox.lib.recoco import Timer
 from pox.lib.packet.ipv4 import ipv4
+import atp_event as atp
 log = core.getLogger()
 
 class check_packetIn(Event):
@@ -44,3 +45,4 @@ class adaptiveThreatPrevention (EventMixin):
 
 def launch():
 	core.registerNew(adaptiveThreatPrevention)
+	atp.launch()
