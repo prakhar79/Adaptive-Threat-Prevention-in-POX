@@ -35,16 +35,28 @@ send flow stats reqest to open flow switches.
 4. _handle_FlowStatsReceived : This will handle FlowStatsReceived event raised by the open flow switch. 
 This will get flow stats and get packets counts from the entries.     
 '''
+class addFlowEntry(Event):
+	def __init__(self,event,timeouts):
+		Event.__init__(self)
+		self.event = event
+		self.idleTimeout = timeouts[0]
+		self.hardTimeout = timeouts[1]
+
 
 class atp_events(EventMixin):
 
-	avgCount = 2
+	_eventMixin_events = set([addFlowEntry,])
+
+	minPacket = 2
+	minPacketThreshold = 2
 	avgRequestPktCount = 3
 	minRequestThreshold = 2
-	maxRequestThreshold = 5
+	maxRequestThreshold = 15
 	newIPTable = {}
 	validIPTable = {IPAddr('10.0.0.2') : [0,0], IPAddr('10.0.0.3') : [0,0]}
+	totalIP = len(newIPTable.keys()) + len(validIPTable.keys())
 	regularIPCount = len(validIPTable)
+	ddos = False
 
 	def __init__(self):
 		self.listenTo(core)
@@ -52,8 +64,8 @@ class atp_events(EventMixin):
 		self.dataPackets = 1	
 		self.idleTimeoutAttacker = 30
 		self.hardTimeoutAttacker = 3600
-		self.idleTimeoutRegular = 10
-		self.hardTimeoutRegular = 30
+		self.regularTimeouts = [10,30]
+		self.newTimeouts = [5,30]
 		self.regReq = 3
 	
 	def dropIP (self,event):
@@ -66,14 +78,10 @@ class atp_events(EventMixin):
 		msg.match.dl_type = ethernet.IP_TYPE
 		event.connection.send(msg)
 
-		log.info("Delete %s with %s and %s."
-			%(packet.type,packet.next.protocol,packet.next.srcip))
-
 		msg = of.ofp_flow_mod()
-		msg.priority = 100
+		msg.priority = 1000
 		msg.command = of.OFPFC_ADD
 		msg.match.nw_src = packet.next.srcip
-		msg.match.nw_proto = packet.next.protocol
 		msg.match.dl_type = ethernet.IP_TYPE
 		msg.actions = []
 
@@ -83,85 +91,110 @@ class atp_events(EventMixin):
 		msg.flags=of.OFPFF_SEND_FLOW_REM
 		
 		event.connection.send(msg)
-		log.info("Issusing Drop Entry.")
 
 	def issueNormalEntry(self,event):
 		inport = event.port
 		packet = event.parsed
-		msg = of.ofp_flow_mod()
-		msg.command = of.OFPFC_MODIFY
-		msg.match = of.ofp_match.from_packet(packet,
-			inport)
-		msg.idle_timeout = self.idleTimeoutRegular
-		msg.hard_timeout = self.hardTimeoutRegular
+
+		msg = of.ofp_flow_mod(command=of.OFPFC_MODIFY,
+                                idle_timeout=self.idleTimeoutRegular,
+                                hard_timeout=self.hardTimeoutRegular,
+                                flags=of.OFPFF_SEND_FLOW_REM,
+                                match=of.ofp_match.from_packet(packet,
+                                                               inport))
+		
 		event.connection.send(msg)
+
+	#update minRequestThreshold and MaxRequestThreshold on timely manner.
+	#Update avarage packet count as well. 
+	def updateThreshold(self):
+		self.totalIP = len(self.validIPTable.keys())
+		req = 0
+		for i in self.validIPTable.keys():
+			req = req + self.validIPTable[i][self.requestPackets]
+			self.validIPTable[i] = [0,0]
+		for i in self.newIPTable.keys():
+			self.newIPTable[i] = [0,0]
+		if(len(self.newIPTable) > 15):
+			self.ddos = True
+			print("DDoS detected")
+		else:
+			self.ddos = False
+		lmda = req/self.totalIP
+		print(lmda)
+
 
 	#start when event goes up.
 	def _handle_GoingUpEvent(self,event):
 		self.listenTo(core.openflow)
 		self.listenTo(core.adaptiveThreatPrevention)
+		Timer(10,self.updateThreshold, recurring=True)
 
-	def _handle_check_packetIn(self,event):
-		
+	def _handle_PacketIn(self,event):
 		#parsing the pakcet to get necessary data.
-		packet = event.event.parsed
-		srcIP = packet.next.srcip
+		packet = event.parsed
+		if isinstance(packet.next, ipv4):
+			srcIP = packet.next.srcip
 
-		if(srcIP == HOST_IP):
-			return
+			if(srcIP == HOST_IP):
+				self.raiseEvent(addFlowEntry,event,self.regularTimeouts)
+				return
 
-		if(srcIP in self.validIPTable.keys()):
-			'''
-			#src is registered as regular IP.
-			1. Issue a normal entry.
-			2. srcIP reqPacketcount ++.
-			'''
+			if(srcIP in self.validIPTable.keys()):
+				'''
+				#src is registered as regular IP.
+				1. Issue a normal entry.
+				2. srcIP reqPacketcount ++.
+				'''
 
-			self.issueNormalEntry(event.event)
-			self.validIPTable[srcIP][self.requestPackets] += 1
+				self.raiseEvent(addFlowEntry,event,self.regularTimeouts)
+				self.validIPTable[srcIP][self.requestPackets] += 1
 
-			'''
-			#Check its reqPacket count.
-			1. If reqPacket count > maxReqCount
-				It's DoS attacker.
-			'''
+				'''
+				#Check its reqPacket count.
+				1. If reqPacket count > maxReqCount
+					It's DoS attacker.
+				'''
 
-			if(self.validIPTable[srcIP][self.requestPackets] > self.maxRequestThreshold):
-				#It will be considered as a DoS attacker.
+				if(self.validIPTable[srcIP][self.requestPackets] > self.maxRequestThreshold):
+					#It will be considered as a DoS attacker.
 
-				#check data packets.
-				if(self.validIPTable[srcIP][self.dataPackets] < (3*self.validIPTable[srcIP][self.requestPackets])):
-					#definately DoS attacker.
+					#check data packets.
+					if(self.validIPTable[srcIP][self.dataPackets] < (3*self.validIPTable[srcIP][self.requestPackets])):
+						#definately DoS attacker.
 
-					#remove from database.
-					del self.validIPTable[srcIP]
+						#remove from database.
+						del self.validIPTable[srcIP]
 
-					#issues drop for long time.
-					self.dropIP(event.event)
+						#issues drop for long time.
+						self.dropIP(event)
 
-		else:
-			if(srcIP not in self.newIPTable.keys()):
-				self.newIPTable[srcIP] = [1,0]
+			else:
+				if(srcIP not in self.newIPTable.keys()):
+					self.newIPTable[srcIP] = [1,0]
 
-			#issue new short entry.
-			self.newIPTable[srcIP][self.requestPackets] += 1
+				#issue new short entry.
+				self.raiseEvent(addFlowEntry,event,self.newTimeouts)
+				self.newIPTable[srcIP][self.requestPackets] += 1
 
-			if(self.newIPTable[srcIP][self.requestPackets] > self.minRequestThreshold):
+				if(self.newIPTable[srcIP][self.requestPackets] > self.minRequestThreshold):
 
-				#get status from the switch.
-				if(self.newIPTable[srcIP][self.dataPackets] < self.avgCount):
-					#Its a DDoS attacker.
-					#issue drop for long time
-					#remove from database.
-					del self.newIPTable[srcIP]
-					self.dropIP(event.event)
-			
+					#get status from the switch.
+					if(self.newIPTable[srcIP][self.dataPackets] < (3*self.newIPTable[srcIP][self.requestPackets])):
+						#Its a DDoS attacker.
+						#issue drop for long time
+						#remove from database.
+						del self.newIPTable[srcIP]
+						self.dropIP(event)
 
-				else:
-					#add to reg database.
-					self.validIPTable[srcIP] = self.newIPTable[srcIP]
-					del self.newIPTable[srcIP]
-
+					else:
+						#add to reg database.
+						self.validIPTable[srcIP] = self.newIPTable[srcIP]
+						del self.newIPTable[srcIP]
+		else :
+			#Normal packets
+			self.raiseEvent(addFlowEntry,event,self.regularTimeouts)		
+		
 
 	#Sending flow state messages to switch.
 	def _handle_flowStatsEvent(self,event):
@@ -183,11 +216,13 @@ class atp_events(EventMixin):
 	def _handle_FlowRemoved(self,event):
 		msg = event.ofp
 		f_ip = msg.match.nw_src
-	
+		
 		if(f_ip in self.newIPTable.keys()):
 			self.newIPTable[f_ip][self.dataPackets] = self.newIPTable[f_ip][self.dataPackets] + msg.packet_count
+	
 		elif (f_ip in self.validIPTable.keys()):
 			self.validIPTable[f_ip][self.dataPackets] = self.validIPTable[f_ip][self.dataPackets] + msg.packet_count
+
 
 def launch():
 	core.registerNew(atp_events)

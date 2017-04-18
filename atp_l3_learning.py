@@ -151,14 +151,19 @@ class l3_switch (EventMixin):
 
   def _handle_GoingUpEvent (self, event):
     self.listenTo(core.openflow)
+    self.listenTo(core.adaptiveThreatPrevention)
+    self.listenTo(core.atp_events)
     log.debug("Up...")
 
-  def _handle_PacketIn (self, event):
+  def _handle_addFlowEntry (self,event):
 
+    FLOW_IDLE_TIMEOUT = event.idleTimeout
+    FLOW_HARD_TIMEOUT = event.hardTimeout
+    event = event.event
     dpid = event.connection.dpid
     inport = event.port
     packet = event.parsed
-
+    
     if not packet.parsed:
       log.warning("%i %i ignoring unparsed packet", dpid, inport)
       return
