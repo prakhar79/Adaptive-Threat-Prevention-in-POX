@@ -10,9 +10,8 @@ import pox
 from pox.lib.recoco import Timer
 from pox.lib.packet.ipv4 import ipv4
 import atp_event as atp
+
 log = core.getLogger()
-
-
 
 class flowStatsEvent(Event):
 	def __init__(self):

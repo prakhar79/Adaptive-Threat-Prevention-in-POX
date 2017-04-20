@@ -47,9 +47,8 @@ class atp_events(EventMixin):
 
 	_eventMixin_events = set([addFlowEntry,])
 
-	minPacket = 2
-	minPacketThreshold = 2
-	avgRequestPktCount = 3
+	totalRequestCount = 0
+	minPacketThreshold = 4
 	minRequestThreshold = 2
 	maxRequestThreshold = 15
 	newIPTable = {}
@@ -68,6 +67,7 @@ class atp_events(EventMixin):
 		self.newTimeouts = [5,30]
 		self.regReq = 3
 	
+	#Function to drop and block suspected IP.
 	def dropIP (self,event):
 		packet = event.parsed
 		msg = of.ofp_flow_mod()
@@ -92,36 +92,22 @@ class atp_events(EventMixin):
 		
 		event.connection.send(msg)
 
-	def issueNormalEntry(self,event):
-		inport = event.port
-		packet = event.parsed
-
-		msg = of.ofp_flow_mod(command=of.OFPFC_MODIFY,
-                                idle_timeout=self.idleTimeoutRegular,
-                                hard_timeout=self.hardTimeoutRegular,
-                                flags=of.OFPFF_SEND_FLOW_REM,
-                                match=of.ofp_match.from_packet(packet,
-                                                               inport))
-		
-		event.connection.send(msg)
-
 	#update minRequestThreshold and MaxRequestThreshold on timely manner.
 	#Update avarage packet count as well. 
 	def updateThreshold(self):
-		self.totalIP = len(self.validIPTable.keys())
-		req = 0
+		self.totalIP = len(self.validIPTable.keys() + self.newIPTable.keys())
+
 		for i in self.validIPTable.keys():
-			req = req + self.validIPTable[i][self.requestPackets]
 			self.validIPTable[i] = [0,0]
-		for i in self.newIPTable.keys():
-			self.newIPTable[i] = [0,0]
+	
 		if(len(self.newIPTable) > 15):
 			self.ddos = True
 			print("DDoS detected")
 		else:
 			self.ddos = False
-		lmda = req/self.totalIP
-		print(lmda)
+		lmda = self.totalRequestCount/self.totalIP
+		self.totalRequestCount = 0
+		print(str(lmda) + " " + str(self.totalIP))
 
 
 	#start when event goes up.
@@ -130,6 +116,7 @@ class atp_events(EventMixin):
 		self.listenTo(core.adaptiveThreatPrevention)
 		Timer(10,self.updateThreshold, recurring=True)
 
+	#Handle PacketIn Requests coming from switches.
 	def _handle_PacketIn(self,event):
 		#parsing the pakcet to get necessary data.
 		packet = event.parsed
@@ -148,6 +135,7 @@ class atp_events(EventMixin):
 				'''
 
 				self.raiseEvent(addFlowEntry,event,self.regularTimeouts)
+				self.totalRequestCount += 1
 				self.validIPTable[srcIP][self.requestPackets] += 1
 
 				'''
@@ -171,19 +159,22 @@ class atp_events(EventMixin):
 
 			else:
 				if(srcIP not in self.newIPTable.keys()):
-					self.newIPTable[srcIP] = [1,0]
+					self.newIPTable[srcIP] = [0,0]
 
 				#issue new short entry.
 				self.raiseEvent(addFlowEntry,event,self.newTimeouts)
+				self.totalRequestCount += 1
 				self.newIPTable[srcIP][self.requestPackets] += 1
 
 				if(self.newIPTable[srcIP][self.requestPackets] > self.minRequestThreshold):
 
 					#get status from the switch.
+
 					if(self.newIPTable[srcIP][self.dataPackets] < (3*self.newIPTable[srcIP][self.requestPackets])):
 						#Its a DDoS attacker.
 						#issue drop for long time
 						#remove from database.
+						print("Dropped %s" % srcIP)
 						del self.newIPTable[srcIP]
 						self.dropIP(event)
 
@@ -210,7 +201,8 @@ class atp_events(EventMixin):
 		for f in event.stats:
 			flow_count += 1
 			packet_count += f.packet_count
-		log.info("Flow are %s and Total packets = %s" % (flow_count,packet_count))
+		log.info("Flow: %s, Data packets: %s, Total Requestpackets: %s"
+			% (flow_count,packet_count,self.totalRequestCount))
 	
 	#To get the packet count from a given IP address. 
 	def _handle_FlowRemoved(self,event):
